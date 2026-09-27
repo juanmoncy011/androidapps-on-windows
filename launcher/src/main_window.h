@@ -6,10 +6,13 @@
 #include <wrl/client.h>
 
 #include <apkcore/apk.h>
+#include <pkgmgr/package_manager.h>
 
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,6 +27,14 @@ public:
     bool create(HINSTANCE instance, int showCommand, std::filesystem::path initialFolder);
     void startScan();
     void chooseFolder();
+    void installSelected();
+    void selectAll();
+
+    struct InstalledVersion {
+        std::int64_t versionCode = 0;
+        std::string versionName;
+    };
+    using InstalledMap = std::map<std::string, InstalledVersion>;  // package -> installed version
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -44,10 +55,23 @@ private:
     void populate();
     void showDetails(const apkcore::ApkInfo& app);
     void setStatus(const std::wstring& text);
+
+    // Package Manager (M2) integration
+    struct InstallBatch {
+        std::vector<apkcore::ApkInfo> apks;
+        std::vector<pkgmgr::InstallResult> results;
+    };
+    std::vector<int> selectedRows() const;
+    void refreshInstalled();
+    void startInstall(std::vector<apkcore::ApkInfo> apks, bool allowDowngrade);
+    void onInstallDone(InstallBatch batch);
+    void uninstallSelected();
+    void updateButtons();
     int scale(int v) const { return MulDiv(v, int(dpi_), 96); }
 
     HINSTANCE inst_{};
-    HWND hwnd_{}, list_{}, btnOpen_{}, btnRescan_{}, chkRecursive_{}, lblFolder_{}, status_{};
+    HWND hwnd_{}, list_{}, btnOpen_{}, btnRescan_{}, chkRecursive_{}, btnInstall_{}, btnUninstall_{}, lblFolder_{},
+        status_{};
     HFONT font_{};
     HIMAGELIST images_{};
     UINT dpi_ = 96;
@@ -62,4 +86,11 @@ private:
     std::thread worker_;
     std::atomic<bool> cancel_{false};
     std::chrono::steady_clock::time_point scanStart_;
+
+    std::unique_ptr<pkgmgr::PackageManager> pm_;  // null if the store could not be opened
+    std::wstring pmError_;
+    InstalledMap installed_;
+    std::thread installer_;
+    std::atomic<bool> installCancel_{false};
+    bool installing_ = false;
 };
