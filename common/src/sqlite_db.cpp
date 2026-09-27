@@ -2,7 +2,7 @@
 
 #include <sqlite3.h>
 
-namespace pkgmgr::detail {
+namespace aow::sql {
 namespace {
 
 [[noreturn]] void fail(sqlite3* db, const std::string& what) {
@@ -53,6 +53,10 @@ std::string Statement::text(int column) const {
 
 std::int64_t Statement::int64(int column) const { return sqlite3_column_int64(stmt_, column); }
 
+bool Statement::isNull(int column) const { return sqlite3_column_type(stmt_, column) == SQLITE_NULL; }
+
+int Statement::parameterCount() const { return sqlite3_bind_parameter_count(stmt_); }
+
 Database::Database(const std::filesystem::path& file) {
     const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
     if (sqlite3_open_v2(file.u8string().c_str(), &db_, flags, nullptr) != SQLITE_OK) {
@@ -88,4 +92,4 @@ void Transaction::commit() {
     done_ = true;
 }
 
-} // namespace pkgmgr::detail
+} // namespace aow::sql

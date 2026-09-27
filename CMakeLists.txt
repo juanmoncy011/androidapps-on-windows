@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(AndroidAppsOnWindows VERSION 0.1.0 LANGUAGES C CXX)
 
 # Group 11 - Native Integration for Android Applications on Windows
-# Modules: core (apkcore) -> launcher (M1) -> package manager (M2, pkgmgr/) -> runtime (M3) -> integration (M4) -> windowing (M5)
+# Modules: core (apkcore) -> launcher (M1) -> package manager (M2, pkgmgr/) -> runtime manager (M3, runtime/) -> integration (M4) -> windowing (M5)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -68,7 +68,9 @@ endif()
 
 # ---- modules ----------------------------------------------------------------
 add_subdirectory(core)
+add_subdirectory(common)
 add_subdirectory(pkgmgr)
+add_subdirectory(runtime)
 add_subdirectory(tools)
 if(WIN32)
   add_subdirectory(launcher)

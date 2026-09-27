@@ -16,6 +16,7 @@
 
 namespace fs = std::filesystem;
 using namespace pkgmgr::detail;
+using namespace aow::sql;
 
 namespace pkgmgr {
 namespace {
