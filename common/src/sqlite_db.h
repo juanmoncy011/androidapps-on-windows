@@ -8,7 +8,7 @@
 struct sqlite3;
 struct sqlite3_stmt;
 
-namespace pkgmgr::detail {
+namespace aow::sql {
 
 struct DbError : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -27,8 +27,10 @@ public:
     void run();   // step() for statements that return no rows
     void reset();
 
+    int parameterCount() const;
     std::string text(int column) const;  // 0-based
     std::int64_t int64(int column) const;
+    bool isNull(int column) const;
 
 private:
     sqlite3* db_;
@@ -63,4 +65,4 @@ private:
     bool done_ = false;
 };
 
-} // namespace pkgmgr::detail
+} // namespace aow::sql

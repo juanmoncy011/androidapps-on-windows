@@ -18,8 +18,10 @@ constexpr UINT WM_APP_PROGRESS = WM_APP + 1;
 constexpr UINT WM_APP_SCAN_DONE = WM_APP + 2;
 constexpr UINT WM_APP_INSTALL_PROGRESS = WM_APP + 3;
 constexpr UINT WM_APP_INSTALL_DONE = WM_APP + 4;
+constexpr UINT WM_APP_RUNTIME_EVENT = WM_APP + 5;
+constexpr UINT WM_APP_RUNTIME_JOB_DONE = WM_APP + 6;
 
-enum ControlId : int { IDC_OPEN = 101, IDC_RESCAN, IDC_RECURSIVE, IDC_FOLDER, IDC_LIST, IDC_STATUS, IDC_INSTALL, IDC_UNINSTALL };
+enum ControlId : int { IDC_OPEN = 101, IDC_RESCAN, IDC_RECURSIVE, IDC_FOLDER, IDC_LIST, IDC_STATUS, IDC_INSTALL, IDC_UNINSTALL, IDC_LAUNCH, IDC_STOP };
 enum Column : int { ColApp, ColPackage, ColVersion, ColStatus, ColMinSdk, ColTargetSdk, ColAbis, ColSize, ColFile, ColCount };
 
 struct ColumnDef { const wchar_t* title; int width; int format; };
@@ -70,9 +72,11 @@ std::wstring cellText(const apkcore::ApkInfo& a, int col, const InstalledMap& in
         const auto it = installed.find(a.packageName);
         if (it == installed.end()) return L"Not installed";
         const auto& v = it->second;
-        if (v.versionCode == a.versionCode) return L"Installed";
+        const std::wstring running = v.running ? L" \u2022 Running" : L"";
+        if (v.versionCode == a.versionCode) return L"Installed" + running;
         const std::wstring ver = widen(v.versionName.empty() ? std::to_string(v.versionCode) : v.versionName);
-        return (a.versionCode > v.versionCode ? L"Update available (installed " : L"Older (installed ") + ver + L")";
+        return (a.versionCode > v.versionCode ? L"Update available (installed " : L"Older (installed ") + ver + L")" +
+               running;
     }
     case ColMinSdk: return a.ok() ? sdkText(a.minSdk) : std::wstring();
     case ColTargetSdk: return a.ok() ? sdkText(a.targetSdk) : std::wstring();
@@ -171,6 +175,17 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, fs::path initialFol
     } catch (const std::exception& e) {
         pmError_ = L"Package Manager unavailable: " + widen(e.what());
     }
+    if (pm_) {
+        std::string err;
+        if (auto backend = runtime::createBackend({}, &err)) {
+            try {
+                rt_ = std::make_unique<runtime::RuntimeManager>(*pm_, std::move(backend));
+            } catch (const std::exception& e) {
+                err = e.what();
+            }
+        }
+        if (!rt_) rtError_ = L"Runtime unavailable: " + widen(err);
+    }
 
     const int sysDpi = int(GetDpiForSystem());
     HWND h = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Android Apps on Windows \u2014 Launcher",
@@ -229,6 +244,8 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_RECURSIVE: if (HIWORD(wp) == BN_CLICKED) startScan(); return 0;
         case IDC_INSTALL: installSelected(); return 0;
         case IDC_UNINSTALL: uninstallSelected(); return 0;
+        case IDC_LAUNCH: launchSelected(); return 0;
+        case IDC_STOP: stopSelected(); return 0;
         }
         break;
 
@@ -259,15 +276,36 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_APP_RUNTIME_EVENT: {
+        std::unique_ptr<runtime::RuntimeEvent> e(reinterpret_cast<runtime::RuntimeEvent*>(lp));
+        onRuntimeEvent(*e);
+        return 0;
+    }
+
+    case WM_APP_RUNTIME_JOB_DONE: {
+        std::unique_ptr<JobResult> r(reinterpret_cast<JobResult*>(lp));
+        onRuntimeJobDone(*r);
+        return 0;
+    }
+
     case WM_DESTROY: {
         stopWorker();
         installCancel_ = true;
         if (installer_.joinable()) installer_.join();
+        if (rt_) {  // apps keep running after the launcher closes, like on a phone
+            rt_->setListener(nullptr);
+            rt_->stopMonitor();
+        }
+        if (runtimeJob_.joinable()) runtimeJob_.join();
         MSG m;
         while (PeekMessageW(&m, hwnd_, WM_APP_SCAN_DONE, WM_APP_SCAN_DONE, PM_REMOVE))
             delete reinterpret_cast<std::vector<apkcore::ApkInfo>*>(m.lParam);
         while (PeekMessageW(&m, hwnd_, WM_APP_INSTALL_DONE, WM_APP_INSTALL_DONE, PM_REMOVE))
             delete reinterpret_cast<InstallBatch*>(m.lParam);
+        while (PeekMessageW(&m, hwnd_, WM_APP_RUNTIME_EVENT, WM_APP_RUNTIME_EVENT, PM_REMOVE))
+            delete reinterpret_cast<runtime::RuntimeEvent*>(m.lParam);
+        while (PeekMessageW(&m, hwnd_, WM_APP_RUNTIME_JOB_DONE, WM_APP_RUNTIME_JOB_DONE, PM_REMOVE))
+            delete reinterpret_cast<JobResult*>(m.lParam);
         if (images_) { ImageList_Destroy(images_); images_ = nullptr; }
         if (font_) { DeleteObject(font_); font_ = nullptr; }
         PostQuitMessage(0);
@@ -299,6 +337,8 @@ void MainWindow::onCreate() {
     chkRecursive_ = make(WC_BUTTONW, L"Include subfolders", WS_TABSTOP | BS_AUTOCHECKBOX, IDC_RECURSIVE);
     btnInstall_ = make(WC_BUTTONW, L"Install (Ctrl+I)", WS_TABSTOP | BS_PUSHBUTTON, IDC_INSTALL);
     btnUninstall_ = make(WC_BUTTONW, L"Uninstall", WS_TABSTOP | BS_PUSHBUTTON, IDC_UNINSTALL);
+    btnLaunch_ = make(WC_BUTTONW, L"Launch (Ctrl+L)", WS_TABSTOP | BS_PUSHBUTTON, IDC_LAUNCH);
+    btnStop_ = make(WC_BUTTONW, L"Stop", WS_TABSTOP | BS_PUSHBUTTON, IDC_STOP);
     lblFolder_ = make(WC_STATICW, L"", SS_LEFT | SS_PATHELLIPSIS | SS_CENTERIMAGE, IDC_FOLDER);
     list_ = make(WC_LISTVIEWW, L"", WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS, IDC_LIST);
     status_ = make(STATUSCLASSNAMEW, L"", SBARS_SIZEGRIP, IDC_STATUS);
@@ -318,6 +358,15 @@ void MainWindow::onCreate() {
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_));
     SetWindowTextW(lblFolder_, folder_.empty() ? L"No folder selected" : folder_.c_str());
     updateButtons();
+
+    if (rt_) {
+        HWND h = hwnd_;
+        rt_->setListener([h](const runtime::RuntimeEvent& e) {
+            auto copy = std::make_unique<runtime::RuntimeEvent>(e);
+            if (PostMessageW(h, WM_APP_RUNTIME_EVENT, 0, reinterpret_cast<LPARAM>(copy.get()))) copy.release();
+        });
+        rt_->startMonitor(std::chrono::milliseconds(1000));
+    }
 }
 
 void MainWindow::createFont() {
@@ -327,7 +376,8 @@ void MainWindow::createFont() {
     lf.lfQuality = CLEARTYPE_QUALITY;
     wcscpy_s(lf.lfFaceName, L"Segoe UI");
     HFONT f = CreateFontIndirectW(&lf);
-    for (HWND c : {btnOpen_, btnRescan_, chkRecursive_, btnInstall_, btnUninstall_, lblFolder_, list_, status_})
+    for (HWND c : {btnOpen_, btnRescan_, chkRecursive_, btnInstall_, btnUninstall_, btnLaunch_, btnStop_, lblFolder_,
+                   list_, status_})
         if (c) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(f), TRUE);
     if (font_) DeleteObject(font_);
     font_ = f;
@@ -350,6 +400,8 @@ void MainWindow::layout() {
     place(chkRecursive_, scale(140));
     place(btnInstall_, scale(115));
     place(btnUninstall_, scale(90));
+    place(btnLaunch_, scale(115));
+    place(btnStop_, scale(70));
     MoveWindow(lblFolder_, x, pad, std::max(0, int(rc.right) - x - pad), btnH, TRUE);
 
     const int top = pad * 2 + btnH;
@@ -452,6 +504,7 @@ void MainWindow::onScanDone(std::vector<apkcore::ApkInfo> apps) {
     std::wstring text = buf;
     if (!pmError_.empty()) text += L"  |  " + pmError_;
     else text += L"  |  " + std::to_wstring(installed_.size()) + L" app(s) installed";
+    text += L"  |  " + (rt_ ? L"Runtime: " + widen(rt_->backend().description()) : rtError_);
     setStatus(text);
 }
 
@@ -569,6 +622,9 @@ void MainWindow::showDetails(const apkcore::ApkInfo& a) {
         s << L"\nStatus: " << cellText(a, ColStatus, installed_);
         if (pm_ && installed_.count(a.packageName))
             if (const auto p = pm_->find(a.packageName)) s << L"\nInstalled copy: " << p->apkPath.wstring();
+        if (rt_)
+            if (const auto r = rt_->running(a.packageName))
+                s << L"\nRunning: PID " << r->pid << L" on " << widen(rt_->backend().description());
 
         s << L"\n\nPermissions (" << a.permissions.size() << L"):";
         const std::size_t shown = std::min<std::size_t>(a.permissions.size(), 20);
@@ -596,23 +652,43 @@ void MainWindow::refreshInstalled() {
     installed_.clear();
     if (!pm_) return;
     for (const auto& p : pm_->list()) installed_[p.packageName] = {p.versionCode, p.versionName};
+    if (!rt_) return;
+    for (const auto& s : rt_->running()) {
+        auto it = installed_.find(s.packageName);
+        if (it != installed_.end()) { it->second.running = true; it->second.pid = s.pid; }
+    }
+}
+
+void MainWindow::refreshList() {
+    const std::vector<int> selection = selectedRows();  // row order is unchanged
+    refreshInstalled();
+    populate();
+    for (int i : selection) ListView_SetItemState(list_, i, LVIS_SELECTED, LVIS_SELECTED);
+    updateButtons();
 }
 
 void MainWindow::updateButtons() {
-    bool canInstall = false, canUninstall = false;
-    if (pm_ && !installing_) {
+    bool canInstall = false, canUninstall = false, canLaunch = false, canStop = false;
+    if (pm_ && !installing_ && !runtimeBusy_) {
         for (int i : selectedRows()) {
             const auto& a = apps_[std::size_t(i)];
-            canInstall |= a.ok();
-            canUninstall |= a.ok() && installed_.count(a.packageName) > 0;
+            if (!a.ok()) continue;
+            canInstall = true;
+            const auto it = installed_.find(a.packageName);
+            if (it == installed_.end()) continue;
+            canUninstall = true;
+            canLaunch |= rt_ && !it->second.running;
+            canStop |= rt_ && it->second.running;
         }
     }
     EnableWindow(btnInstall_, canInstall);
     EnableWindow(btnUninstall_, canUninstall);
+    EnableWindow(btnLaunch_, canLaunch);
+    EnableWindow(btnStop_, canStop);
 }
 
 void MainWindow::installSelected() {
-    if (!pm_ || installing_) return;
+    if (!pm_ || installing_ || runtimeBusy_) return;
     std::vector<apkcore::ApkInfo> todo;
     for (int i : selectedRows())
         if (apps_[std::size_t(i)].ok()) todo.push_back(apps_[std::size_t(i)]);
@@ -660,12 +736,7 @@ void MainWindow::onInstallDone(InstallBatch batch) {
         }
     }
 
-    // Row order is unchanged, so the selection survives the repopulate.
-    const std::vector<int> selection = selectedRows();
-    refreshInstalled();
-    populate();
-    for (int i : selection) ListView_SetItemState(list_, i, LVIS_SELECTED, LVIS_SELECTED);
-    updateButtons();
+    refreshList();
 
     wchar_t buf[160];
     swprintf_s(buf, L"Install finished: %zu new, %zu updated, %zu already installed, %zu failed  |  %zu app(s) installed",
@@ -685,7 +756,7 @@ void MainWindow::onInstallDone(InstallBatch batch) {
 }
 
 void MainWindow::uninstallSelected() {
-    if (!pm_ || installing_) return;
+    if (!pm_ || installing_ || runtimeBusy_) return;
     std::vector<std::string> packages;
     std::wstring names;
     for (int i : selectedRows()) {
@@ -703,16 +774,103 @@ void MainWindow::uninstallSelected() {
     std::wstring errors;
     for (const auto& pkg : packages) {
         std::string err;
+        if (rt_ && installed_[pkg].running) rt_->stop(pkg);  // an app is closed before it is removed
         if (!pm_->uninstall(pkg, &err)) errors += L"• " + widen(pkg) + L": " + widen(err) + L"\n";
     }
-    const std::vector<int> selection = selectedRows();
-    refreshInstalled();
-    populate();
-    for (int i : selection) ListView_SetItemState(list_, i, LVIS_SELECTED, LVIS_SELECTED);
-    updateButtons();
+    refreshList();
     setStatus(L"Uninstalled " + std::to_wstring(packages.size()) + L" app(s)  |  " +
               std::to_wstring(installed_.size()) + L" app(s) installed");
     if (!errors.empty())
         MessageBoxW(hwnd_, (L"Some apps could not be uninstalled:\n\n" + errors).c_str(), L"Uninstall",
                     MB_OK | MB_ICONWARNING);
+}
+
+// ---- Runtime Manager (M3) ---------------------------------------------------
+
+std::vector<std::string> MainWindow::selectedPackages(bool running) const {
+    std::vector<std::string> out;
+    for (int i : selectedRows()) {
+        const auto& a = apps_[std::size_t(i)];
+        const auto it = installed_.find(a.packageName);
+        if (!a.ok() || it == installed_.end() || it->second.running != running) continue;
+        if (std::find(out.begin(), out.end(), a.packageName) == out.end()) out.push_back(a.packageName);
+    }
+    return out;
+}
+
+void MainWindow::launchSelected() {
+    if (!rt_ || installing_ || runtimeBusy_) return;
+    const auto packages = selectedPackages(false);
+    if (packages.empty()) return;
+    runtime::RuntimeManager* rt = rt_.get();
+    startRuntimeJob([rt, packages] {
+        JobResult r;
+        std::size_t launched = 0;
+        for (const auto& pkg : packages) {
+            const auto res = rt->launch(pkg);  // may deploy the APK to a device first
+            if (res.ok) ++launched;
+            else r.errors += L"• " + widen(pkg) + L": " + widen(res.error) + L"\n";
+        }
+        r.status = L"Launched " + std::to_wstring(launched) + L" app(s) on " + widen(rt->backend().description());
+        return r;
+    }, L"Launching…");
+}
+
+void MainWindow::stopSelected() {
+    if (!rt_ || installing_ || runtimeBusy_) return;
+    const auto packages = selectedPackages(true);
+    if (packages.empty()) return;
+    runtime::RuntimeManager* rt = rt_.get();
+    startRuntimeJob([rt, packages] {
+        JobResult r;
+        std::size_t stopped = 0;
+        for (const auto& pkg : packages) {
+            std::string err;
+            if (rt->stop(pkg, &err)) ++stopped;
+            else r.errors += L"• " + widen(pkg) + L": " + widen(err) + L"\n";
+        }
+        r.status = L"Stopped " + std::to_wstring(stopped) + L" app(s)";
+        return r;
+    }, L"Stopping…");
+}
+
+void MainWindow::startRuntimeJob(std::function<JobResult()> work, const std::wstring& busyText) {
+    if (runtimeJob_.joinable()) runtimeJob_.join();
+    runtimeBusy_ = true;
+    updateButtons();
+    setStatus(busyText);
+    HWND h = hwnd_;
+    runtimeJob_ = std::thread([h, work = std::move(work)] {
+        auto result = std::make_unique<JobResult>(work());
+        if (PostMessageW(h, WM_APP_RUNTIME_JOB_DONE, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
+    });
+}
+
+void MainWindow::onRuntimeJobDone(const JobResult& result) {
+    if (runtimeJob_.joinable()) runtimeJob_.join();
+    runtimeBusy_ = false;
+    refreshList();
+    setStatus(result.status);
+    if (!result.errors.empty())
+        MessageBoxW(hwnd_, (L"Some apps could not be started or stopped:\n\n" + result.errors).c_str(), L"Runtime",
+                    MB_OK | MB_ICONWARNING);
+}
+
+void MainWindow::onRuntimeEvent(const runtime::RuntimeEvent& e) {
+    refreshList();
+    const std::wstring name = widen(e.session.displayName());
+    switch (e.kind) {
+    case runtime::EventKind::Started:
+        setStatus(name + L" started (PID " + std::to_wstring(e.session.pid) + L")");
+        break;
+    case runtime::EventKind::Stopped:
+        setStatus(name + L" stopped");
+        break;
+    case runtime::EventKind::Exited:
+        setStatus(name + L" exited" + (e.session.detail.empty() ? L"" : L" — " + widen(e.session.detail)));
+        break;
+    case runtime::EventKind::Crashed:
+        setStatus(name + L" crashed (exit code " + std::to_wstring(e.session.exitCode.value_or(-1)) + L")");
+        break;
+    }
 }

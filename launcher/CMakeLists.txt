@@ -1,5 +1,6 @@
 # Module 1 - Launcher: scans a folder for APKs and lists them in a Win32 UI;
-# installs/uninstalls them through the Package Manager (M2)
+# installs/uninstalls them through the Package Manager (M2) and launches/stops
+# them through the Runtime Manager (M3)
 add_executable(launcher WIN32
   src/main.cpp
   src/main_window.cpp
@@ -8,8 +9,9 @@ add_executable(launcher WIN32
 )
 set_target_properties(launcher PROPERTIES OUTPUT_NAME "AowLauncher")
 target_compile_definitions(launcher PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00)
-target_link_libraries(launcher PRIVATE apkcore pkgmgr project_options
+target_link_libraries(launcher PRIVATE apkcore pkgmgr runtime project_options
   comctl32 shell32 ole32 uxtheme windowscodecs)
 if(MINGW)
   target_link_options(launcher PRIVATE -municode)
 endif()
+add_dependencies(launcher aowhost)
