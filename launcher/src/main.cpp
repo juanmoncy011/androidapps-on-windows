@@ -29,6 +29,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             if (msg.message == WM_KEYDOWN) {
                 if (msg.wParam == VK_F5) { window.startScan(); continue; }
                 if (msg.wParam == 'O' && GetKeyState(VK_CONTROL) < 0) { window.chooseFolder(); continue; }
+                if (msg.wParam == 'I' && GetKeyState(VK_CONTROL) < 0) { window.installSelected(); continue; }
+                if (msg.wParam == 'A' && GetKeyState(VK_CONTROL) < 0) { window.selectAll(); continue; }
             }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
